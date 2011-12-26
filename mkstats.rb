@@ -8,10 +8,12 @@ require 'thread'
 puts "Input PRM file names to command line, please..."
 file_list = []
 STDIN.each_line {|fname| file_list << fname.chomp }
-results_dir = "lints"
+RESULTS_DIR = "lints"
+BAD_RESULTS_DIR = "bad_reports"
 
 # Get reports
-FileUtils.mkdir_p results_dir
+FileUtils.mkdir_p RESULTS_DIR
+FileUtils.mkdir_p BAD_RESULTS_DIR
 
 progress = 0.0
 nrp = 0.0
@@ -23,11 +25,21 @@ file_list.each {|f| fq.push f}
 
 workers = []
 
+# set the env var so that bad signature stuff doesn't make warnings the errors!
+ENV['RPMBUILD_MAINTAINER_MODE'] = '1'
+
+def lint_from_rpm(rpm_fname, d = RESULTS_DIR)
+	File.join(d,"#{File.basename(rpm_fname)}.txt")
+end
+def rpm_from_lint(lint_fname)
+	/(.*)\.txt$/.match(File.basename(lint_fname))[1]
+end
+
 3.times do
 	workers << Thread.new do
 		while rpm_fname = statlock.synchronize { fq.empty? ? nil : fq.shift }
 
-			lint_fname = File.join(results_dir,File.basename(rpm_fname))
+			lint_fname = lint_from_rpm(rpm_fname)
 
 			statlock.synchronize { progress += 1.0 }
 
@@ -39,7 +51,7 @@ workers = []
 				# Record rpmlint failure
 				# Since rpmlint now fails on each package, then make it fail silently...
 				#puts "rpmlint failure detected!"
-				File.open(lint_fname,"a") {|f| f.puts "foobar: W: rpmlint-has-failed"}
+				#File.open(lint_fname,"a") {|f| f.puts "foobar: W: rpmlint-has-failed"}
 			end
 
 			statlock.synchronize do
@@ -55,14 +67,14 @@ end
 workers.each {|w| w.join}
 
 # Collect stats
-results_fnames = file_list.map {|rpm_fname| File.join(results_dir,File.basename(rpm_fname))} 
+results_fnames = file_list.map {|rpm_fname| lint_from_rpm(rpm_fname)} 
 
 # Format : package => array of warnings it exposes
 pkg_info = {}
 pkg_info_ext = {}
 
 results_fnames.each do |result_f|
-	pkg_name = File.basename result_f
+	pkg_name = rpm_from_lint result_f
 
 	pin = pkg_info[pkg_name] = []
 	pex = pkg_info_ext[pkg_name] = []
@@ -83,11 +95,12 @@ end
 
 # 1. Warnings per package
 warns_per_package = pkg_info.inject({}) {|acc,kv| acc[kv[0]] = kv[1].length; acc}
-File.open("warns_per_pkg","w") do |f|
+File.open("warns_per_pkg_","w") do |f|
 	warns_per_package.each_pair do |pkg,warns|
 		f.puts "#{warns} #{pkg}"
 	end
 end
+Kernel.system('sort -n -r <warns_per_pkg_ >warns_per_pkg')
 
 # 2. What packages will fail
 pkg_status = pkg_info_ext.inject({}) do |acc,kv|
@@ -95,6 +108,8 @@ pkg_status = pkg_info_ext.inject({}) do |acc,kv|
 	kv[1].each do |msg|
 		if md = /badness ([0-9]+) exceeds threshold/.match(msg)
 			failmsg = "BAD #{md[1]}" 
+			# if so, copy its report to the separate folder
+			FileUtils.cp(lint_from_rpm(kv[0]),lint_from_rpm(kv[0],BAD_RESULTS_DIR))
 		end
 	end
 	acc[kv[0]] = failmsg
@@ -105,5 +120,8 @@ File.open("pkg_status","w") do |f|
 		f.puts "#{warns} #{pkg}"
 	end
 end
+
+Kernel.system('grep BAD pkg_status >bad_packages_')
+Kernel.system('sort -n -r -k 2 <bad_packages_ >bad_packages')
 
 
